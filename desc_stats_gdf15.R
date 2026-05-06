@@ -21,11 +21,11 @@ data["mdq_"]
 data_noblanks=data[, apply(data, 2, function(x) !all(is.na(x)))]
 
 # Import available samples
-data_samples=read_excel("data/samples_V0V1V2_Evanne.xlsx") ; head(data_samples)
+data_samples=read_excel("data/samples_V0V1V2_Evanne_GDF15.xlsx") ; head(data_samples)
 data_samples_V0=data_samples[data_samples$VISITE=='V0',]
 
 # Merge data with available samples we have by patient ID
-merged_data_V0=merge(data_noblanks, data_samples_V0, by = "fondacode")
+merged_data_V0=merge(data_noblanks, data_samples_V0[, c("fondacode", "GDF15 pg/ml")], by = "fondacode")
 # sample id 0201805210 missing in database
 
 table(merged_data_V0$arm, useNA = "ifany")
