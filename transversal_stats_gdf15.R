@@ -382,7 +382,7 @@ unique(df$AA[!grepl("^[0-9,\\.]+$", df$AA)])
 
 # TEST
 
-results_spearman <- test_spearman_pairwise(
+results_biomarkers <- test_spearman_pairwise(
   df             = df_biomarkers_GDF15,
   alpha          = 0.05,
   check_autocor  = FALSE,
@@ -392,29 +392,82 @@ results_spearman <- test_spearman_pairwise(
 # outliers not influential
 
 # Complete significant tab
-print(results_spearman) 
+print(results_biomarkers) 
 
 # Only suspect pairs
-results_spearman %>% filter(advice != "Spearman valid")
+results_biomarkers %>% filter(advice != "Spearman valid")
 
 # Significant and valid pairs
-results_spearman %>% filter(spearman_p < 0.05, spearman_ok)
+results_biomarkers %>% filter(spearman_p < 0.05, spearman_ok)
 
 # Heatmap with all significant pairs
-plot_spearman_heatmap(df = df, results = results_spearman, alpha = 0.05)
+plot_spearman_heatmap(df = df, results = results_biomarkers, alpha = 0.05)
 
 # Only pairs significantly associated with GDF15
-heatmap_GDF15 <- plot_spearman_heatmap(
+heatmap_biomarkers_GDF15 <- plot_spearman_heatmap(
   df        = df,
-  results   = results_spearman,
+  results   = results_biomarkers,
   alpha     = 0.05,
   focus_var = "GDF15 pg/ml"
-) ; heatmap_GDF15
+) ; heatmap_biomarkers_GDF15
 
 # Export with ggsave
 ggsave(
-  filename = "outcome/heatmap_GDF15.png",
-  plot     = heatmap_GDF15,
+  filename = "outcome/heatmap_biomarkers_GDF15.png",
+  plot     = heatmap_biomarkers_GDF15,
+  width    = 8,      # adjust based on number of variables
+  height   = 7,
+  dpi      = 300,    # high resolution for publication
+  bg       = "white" # white background
+)
+
+###################### USAGE FOR GDF15 WITH CLINICAL DATA ######################
+
+# Selected variables for the study
+#df_clinical_GDF15=df[,c("age","madrs_","ymrs_num", "fast_","bis10","staya","mars_","mathys_", "psqi_", "als_", "ctq29", "ctq31", "ctq33", "ctq35", "ctq37", "ctq39","GDF15 pg/ml")]
+
+# Exploratory variables
+df_clinical_GDF15=cbind(df[,56:81], df[,c("fondacode", "age", "bmi", "ymrs_num", "GDF15 pg/ml")])
+
+df_clinical_GDF15 <- df_clinical_GDF15 %>%
+  filter(rowSums(!is.na(.)) > 1)
+# no missing values for a complete row
+
+# TEST
+
+results_clinical <- test_spearman_pairwise(
+  df             = df_clinical_GDF15,
+  alpha          = 0.05,
+  check_autocor  = FALSE,
+  maha_threshold = 0.99,
+  id_col         = "fondacode"
+)
+# outliers not influential
+
+# Complete significant tab
+print(results_clinical) 
+
+# Only suspect pairs
+results_clinical %>% filter(advice != "Spearman valid")
+
+# Significant and valid pairs
+results_clinical %>% filter(spearman_p < 0.05, spearman_ok)
+
+# Heatmap with all significant pairs
+plot_spearman_heatmap(df = df, results = results_clinical, alpha = 0.05)
+
+# Only pairs significantly associated with GDF15
+heatmap_clinical_GDF15 <- plot_spearman_heatmap(
+  df        = df,
+  results   = results_clinical,
+  alpha     = 0.05,
+  focus_var = "GDF15 pg/ml"
+) ; heatmap_clinical_GDF15
+
+# Export with ggsave
+ggsave(
+  filename = "outcome/heatmap_clinical_GDF15.png",
+  plot     = heatmap_clinical_GDF15,
   width    = 8,      # adjust based on number of variables
   height   = 7,
   dpi      = 300,    # high resolution for publication
