@@ -7,6 +7,32 @@ library(effectsize); library(patchwork); library(cowplot)
 
 setwd("~/IMRB/Stats GDF15/")
 
+# ── FACE-BD Color palette ─────────────────────────────────
+facebd_colors <- list(
+  dark_burgundy  = "#6B1A3A",  # figures foncées
+  medium_rose    = "#A83060",  # figures moyennes
+  light_rose     = "#D4789A",  # figures claires
+  very_light_pink = "#F2B8CC", # figures très claires
+  blue_gray      = "#8899AA",  # figures contrôles
+  dark_navy      = "#2D3B6E"   # texte FACE-BD
+)
+
+# Palette séquentielle pour heatmap (bleu → blanc → bordeaux)
+facebd_gradient <- list(
+  low  = "#2D3B6E",  # bleu navy (négatif)
+  mid  = "white",
+  high = "#A83060"   # rose moyen = couleur Inflammation (positif max)
+)
+
+# Palette catégorielle pour groupes
+facebd_groups <- c(
+  "#6B1A3A",  # Clinical      — bordeaux foncé
+  "#8899AA",  # Blood cells   — bleu-gris
+  "#A83060",  # Inflammation  — rose moyen
+  "#2D3B6E",  # KYN pathway   — bleu navy
+  "#D4789A"   # Metabolism    — rose clair
+)
+
 # ════════════════════════════════════════════════════════
 # DATA IMPORT & CLEANING
 # ════════════════════════════════════════════════════════
@@ -177,20 +203,26 @@ plot_spearman_heatmap <- function(df, results, alpha = 0.05, focus_var = NULL,
     p_label <- ifelse(use_adjusted_p & "spearman_p_adj" %in% names(results), "FDR-adjusted p", "raw p")
     p <- ggplot(strip_df, aes(x = x_fixed, y = other_var)) +
       geom_tile(aes(fill = spearman_rho), color = "white", linewidth = 0.5) +
-      geom_text(aes(label = label, fontface = ifelse(sig, "bold", "plain")), size = 4.2, color = "black") +
-      scale_fill_gradient2(low = "#1565C0", mid = "white", high = "#B71C1C",
-                           midpoint = 0, limits = rho_limits, name = "Spearman ρ") +
+      geom_text(aes(label = label, fontface = ifelse(sig, "bold", "plain")), size = 6.2, color = "black") +
+      scale_fill_gradient2(
+        low      = facebd_gradient$low,   # "#2D3B6E"
+        mid      = facebd_gradient$mid,   # "white"
+        high     = facebd_gradient$high,  # "#6B1A3A"
+        midpoint = 0,
+        limits   = rho_limits,
+        name     = "Spearman ρ"
+      ) +
       labs(title = paste("Spearman correlations with", strip_var),
-           subtitle = paste0("Stars based on ", p_label, ": * p<.05  ** p<.01  *** p<.001 | Bold = significant at alpha = ", alpha),
+           subtitle = paste0("Stars based on ", p_label, ": * p<.05  ** p<.01  *** p<.001 | Biological variables in pg/mL"),
            x = strip_var, y = NULL) +
-      theme_minimal(base_size = 12) +
+      theme_minimal(base_size = 16) +
       theme(plot.title = element_text(face = "bold", size = 14),
             plot.subtitle = element_text(size = 9, color = "grey40"),
-            axis.text.y = element_text(face = "bold", size = 12, hjust = 1),
+            axis.text.y = element_text(face = "bold", size = 16, hjust = 1),
             axis.text.x = element_blank(), axis.ticks.x = element_blank(),
             panel.grid = element_blank(), legend.position = "right",
             legend.title = element_text(size = 14, face = "bold"),
-            legend.text = element_text(size = 12), legend.key.size = unit(1, "cm"))
+            legend.text = element_text(size = 14), legend.key.size = unit(1, "cm"))
     print(p); return(invisible(p))
   }
   # Standard heatmap
@@ -252,10 +284,10 @@ plot_spearman_heatmap <- function(df, results, alpha = 0.05, focus_var = NULL,
 }
 
 combine_strip_plots <- function(plot_list, group_labels, results_list, strip_var,
-                                title = "Spearman correlations with GDF15 pg/ml",
-                                label_fill = c("#4A90D9", "#E8A838", "#E05C5C", "#4CAF79", "#9B59B6"),
+                                title = "Spearman correlations with GDF15 pg/mL",
+                                label_fill = facebd_groups,
                                 label_color = "white", rel_widths = NULL,
-                                label_text_size = 4, legend_width = 1) {
+                                label_text_size = 5, legend_width = 1) {
   all_rhos <- lapply(results_list, function(res) {
     res %>% filter(sapply(strsplit(pair, " ~ "), `[`, 1) == strip_var |
                      sapply(strsplit(pair, " ~ "), `[`, 2) == strip_var) %>% pull(spearman_rho)
@@ -264,10 +296,16 @@ combine_strip_plots <- function(plot_list, group_labels, results_list, strip_var
   rho_limits <- c(-global_max, global_max)
   shared_legend <- cowplot::get_legend(
     plot_list[[1]] +
-      scale_fill_gradient2(low = "#1565C0", mid = "white", high = "#B71C1C",
-                           midpoint = 0, limits = rho_limits, name = "Spearman ρ") +
-      theme(legend.position = "right", legend.title = element_text(size = 12, face = "bold"),
-            legend.text = element_text(size = 11), legend.key.size = unit(0.6, "cm")))
+      scale_fill_gradient2(
+        low      = facebd_gradient$low,   # "#2D3B6E"
+        mid      = facebd_gradient$mid,   # "white"
+        high     = facebd_gradient$high,  # "#6B1A3A"
+        midpoint = 0,
+        limits   = rho_limits,
+        name     = "Spearman ρ"
+      ) +
+      theme(legend.position = "right", legend.title = element_text(size = 14, face = "bold"),
+            legend.text = element_text(size = 12), legend.key.size = unit(0.6, "cm")))
   plots_with_labels <- lapply(seq_len(length(plot_list)), function(i) {
     fill_col <- label_fill[((i - 1) %% length(label_fill)) + 1]
     label_banner <- ggplot() +
@@ -276,10 +314,15 @@ combine_strip_plots <- function(plot_list, group_labels, results_list, strip_var
                fontface = "bold", size = label_text_size) +
       theme_void() + theme(plot.margin = margin(0, 2, 0, 2))
     p_clean <- plot_list[[i]] +
-      scale_fill_gradient2(low = "#1565C0", mid = "white", high = "#B71C1C",
-                           midpoint = 0, limits = rho_limits, name = "Spearman ρ") +
-      labs(title = NULL, subtitle = NULL) +
-      theme(legend.position = "none", plot.margin = margin(0, 2, 5, 2))
+      scale_fill_gradient2(
+        low = facebd_gradient$low, mid = facebd_gradient$mid,
+        high = facebd_gradient$high, midpoint = 0,
+        limits = rho_limits, name = "Spearman ρ") +
+      labs(title = NULL, subtitle = NULL) +  # ← doit être après scale_fill
+      theme(legend.position = "none",
+            plot.margin     = margin(0, 2, 5, 2),
+            plot.title      = element_blank(),   # ← forcer en plus
+            plot.subtitle   = element_blank())   # ← forcer en plus
     label_banner / p_clean + plot_layout(heights = c(1, 20))
   })
   combined_with_legend <- cowplot::plot_grid(
@@ -287,10 +330,10 @@ combine_strip_plots <- function(plot_list, group_labels, results_list, strip_var
     nrow = 1, rel_widths = c(sum(rel_widths), legend_width))
   cowplot::plot_grid(
     cowplot::plot_grid(
-      cowplot::ggdraw() + cowplot::draw_label(title, fontface = "bold", size = 16, x = 0.01, hjust = 0),
+      cowplot::ggdraw() + cowplot::draw_label(title, fontface = "bold", size = 18, x = 0.01, hjust = 0),
       cowplot::ggdraw() + cowplot::draw_label(
-        "Stars based on FDR-adjusted p: * p<.05  ** p<.01  *** p<.001 | Bold = significant at alpha = 0.05",
-        size = 9, color = "grey40", x = 0.01, hjust = 0),
+        "Stars based on FDR-adjusted p: * p<.05  ** p<.01  *** p<.001 | Biological variables in pg/mL",
+        size = 16, color = "grey40", x = 0.01, hjust = 0),
       ncol = 1, rel_heights = c(1, 0.6)),
     combined_with_legend, ncol = 1, rel_heights = c(0.08, 1))
 }
@@ -310,7 +353,7 @@ names(df_infla) <- c("IL-12/IL-23p40", "IL-15", "IL-16", "IL-17A", "IL-5", "IL-7
 df_metabo <- df_trans[c("trig_lbstresc", "gluc_lbstresc", "chol_lbstresc", "hdl_lbstresc",
                         "ldl_lbstresc", "mtCN", "CCF_MTDNA_ND1", "creat_lbstresc", "Lactate", "GDF15 pg/ml")]
 names(df_metabo) <- c("Triglycerides", "Glycemia", "Total Cholesterol", "HDL Cholesterol",
-                      "LDL Cholesterol", "mtDNA Copy Number", "Circulating cell-free mtDNA",
+                      "LDL Cholesterol", "mtDNA Copy Number", "ccf-mtDNA",
                       "Creatinine", "Lactate", "GDF15")
 
 df_kyn <- df_trans[c("TRP", "KYN", "OHKYN", "KA", "QUINA", "XA", "AA", "QUINO", "PICO", "GDF15 pg/ml")]
@@ -324,9 +367,9 @@ names(df_blood) <- c("Red Blood Cells", "Platelets", "Monocytes", "Lymphocytes",
                      "Eosinophils", "Basophils", "Neutrophils", "White Blood Cells", "GDF15")
 
 df_clinical <- df_trans[, c("bmi", "age", "madrs_", "ymrs_num", "fagers", "fast_", "bis10",
-                             "staya", "mars_", "mathys_", "psqi_", "als_", "ctq39", "GDF15 pg/ml")]
+                             "staya", "mars_", "mathys_", "psqi_", "als_", "ctq39", "qidsr120", "GDF15 pg/ml")]
 names(df_clinical) <- c("BMI", "Age", "MADRS", "YMRS", "FAGERS", "FAST", "BIS",
-                        "STAY-A", "MARS", "MATHYS", "PSQI", "ALS", "CTQ", "GDF15")
+                        "STAY-A", "MARS", "MATHYS", "PSQI", "ALS", "CTQ", "QIDS", "GDF15")
 
 # ── Run pairwise Spearman ─────────────────────────────────
 run_and_plot_spearman <- function(df_sub, strip_var = "GDF15",
@@ -354,7 +397,7 @@ plot_spearman_heatmap(df = df_trans, results = results_spearman,
                              alpha = 0.05, focus_var = "GDF15 pg/ml")
 
 # ── Combined strip plot ───────────────────────────────────
-ggsave("outcome/combined_stripplot_GDF15.png",
+ggsave("outcome/combined_stripplot_color_GDF15.png",
        combine_strip_plots(
          plot_list    = list(out_clinical$plot, out_blood$plot, out_infla$plot,
                              out_kyn$plot, out_metabo$plot),
@@ -362,6 +405,5 @@ ggsave("outcome/combined_stripplot_GDF15.png",
                              out_kyn$results, out_metabo$results),
          strip_var    = "GDF15",
          group_labels = c("Clinical", "Blood cells", "Inflammation", "KYN pathway", "Metabolism"),
-         rel_widths   = c(1, 1, 1, 1, 1),
-         label_fill   = c("#9B59B6", "#4A90D9", "#E8A838", "#E05C5C", "#4CAF79")),
+         rel_widths   = c(1, 1, 1, 1, 1)),
        width = 22, height = 12, dpi = 300, bg = "white")
