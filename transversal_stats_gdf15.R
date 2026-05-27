@@ -407,3 +407,667 @@ ggsave("outcome/combined_stripplot_color_GDF15.png",
          group_labels = c("Clinical", "Blood cells", "Inflammation", "KYN pathway", "Metabolism"),
          rel_widths   = c(1, 1, 1, 1, 1)),
        width = 22, height = 12, dpi = 300, bg = "white")
+
+###################### LINEAR REGRESSION ######################
+
+
+# ════════════════════════════════════════════════════════
+# FUNCTIONS
+# ════════════════════════════════════════════════════════
+
+run_robust_lm <- function(df, outcome = "log_GDF15") {
+  predictors <- setdiff(names(df)[sapply(df, is.numeric)], outcome)
+  results <- list()
+  for (pred in predictors) {
+    x <- df[[pred]]; y <- df[[outcome]]
+    valid <- complete.cases(x, y); x <- x[valid]; y <- y[valid]; n <- length(x)
+    mod_rob <- rlm(y ~ x, method = "MM"); mod_ols <- lm(y ~ x); s <- summary(mod_rob)
+    beta <- coef(mod_rob)[["x"]]; se <- s$coefficients["x", "Std. Error"]
+    p_val <- 2 * pt(abs(beta / se), df = n - 2, lower.tail = FALSE)
+    r2 <- 1 - sum(mod_rob$residuals^2) / sum((y - mean(y))^2)
+    results[[pred]] <- data.frame(
+      predictor = pred, n = n, beta_robust = round(beta, 4),
+      beta_ols = round(coef(mod_ols)[["x"]], 4), se = round(se, 4),
+      p_value = round(p_val, 4), r_squared = round(r2, 4),
+      n_downweighted = sum(mod_rob$w < 0.5),
+      significance = ifelse(p_val < 0.001, "***", ifelse(p_val < 0.01, "**",
+                                                         ifelse(p_val < 0.05, "*", "ns"))))
+  }
+  do.call(rbind, results) %>% arrange(p_value)
+}
+
+run_anova_against_outcome <- function(df, outcome = "log_GDF15", alpha = 0.05) {
+  predictors <- df %>% dplyr::select(where(~ is.factor(.) | is.character(.))) %>% names()
+  results <- list()
+  for (pred in predictors) {
+    x <- as.factor(df[[pred]]); y <- df[[outcome]]
+    valid <- complete.cases(x, y); x <- droplevels(x[valid]); y <- y[valid]
+    n <- length(x); n_groups <- nlevels(x)
+    if (n_groups < 2 || any(table(x) < 3) ||
+        any(tapply(y, x, var, na.rm = TRUE) == 0, na.rm = TRUE)) next
+    mod <- aov(y ~ x); s <- summary(mod)
+    f_stat <- s[[1]]["x", "F value"]; p_val <- s[[1]]["x", "Pr(>F)"]
+    eta2 <- s[[1]]["x", "Sum Sq"] / sum(s[[1]][, "Sum Sq"])
+    lm_coefs <- coef(lm(y ~ x))[-1]
+    estimates_str <- paste0("ref=", levels(x)[1], " | ",
+                            paste(paste0(gsub("^x", "", names(lm_coefs)), ": ",
+                                         ifelse(lm_coefs > 0, paste0("+", round(lm_coefs, 3)), round(lm_coefs, 3))),
+                                  collapse = " | "))
+    sw  <- tryCatch(shapiro.test(residuals(mod)), error = function(e) list(p.value = NA))
+    lev <- tryCatch(leveneTest(y ~ x), error = function(e) data.frame(`Pr(>F)` = NA))
+    sw_p <- ifelse(is.na(sw$p.value), 0, sw$p.value); lev_p <- lev$`Pr(>F)`[1]
+    assumptions_ok <- sw_p > alpha & !is.na(lev_p) & lev_p > alpha
+    if (assumptions_ok) {
+      posthoc_method <- ifelse(n_groups == 2, "t-test", "Tukey HSD")
+      if (n_groups == 2) p_val <- t.test(y ~ x)$p.value
+    } else {
+      posthoc_method <- ifelse(n_groups == 2, "Wilcoxon", "Kruskal-Wallis")
+      p_val <- if (n_groups == 2) wilcox.test(y ~ x)$p.value else kruskal.test(y ~ x)$p.value
+    }
+    results[[pred]] <- data.frame(
+      predictor = pred, n = n, n_groups = n_groups, estimates = estimates_str,
+      f_statistic = round(f_stat, 4), p_value = round(p_val, 4), eta_squared = round(eta2, 4),
+      shapiro_resid_p = round(sw_p, 4), levene_p = round(lev_p, 4),
+      assumptions_ok = assumptions_ok, posthoc_method = posthoc_method, posthoc_sig = p_val < alpha,
+      significance = ifelse(p_val < 0.001, "***", ifelse(p_val < 0.01, "**",
+                                                         ifelse(p_val < 0.05, "*", "ns"))))
+  }
+  do.call(rbind, results) %>% arrange(p_value)
+}
+
+run_ancova <- function(df, outcome = "log_GDF15",
+                       covariates = "age", alpha = 0.05) {
+  
+  all_vars   <- setdiff(names(df), c(outcome, covariates))
+  cat_preds  <- all_vars[sapply(df[all_vars], function(v) is.factor(v) | is.character(v))]
+  cont_preds <- setdiff(all_vars[sapply(df[all_vars], is.numeric)],
+                        c(toupper(covariates),
+                          paste0(toupper(substring(covariates, 1, 1)),
+                                 substring(covariates, 2))))
+  
+  cov_formula_str <- paste(covariates, collapse = " + ")
+  results <- list()
+  
+  for (pred in c(cat_preds, cont_preds)) {
+    
+    is_cat   <- is.factor(df[[pred]]) | is.character(df[[pred]])
+    x        <- if (is_cat) as.factor(df[[pred]]) else df[[pred]]
+    y        <- df[[outcome]]
+    cov_data <- df[, covariates, drop = FALSE]
+    
+    valid    <- complete.cases(x, y, cov_data)
+    x        <- if (is_cat) droplevels(x[valid]) else x[valid]
+    y        <- y[valid]; cov_data <- cov_data[valid, , drop = FALSE]
+    n        <- length(x); n_groups <- if (is_cat) nlevels(x) else NA
+    
+    # ── Skip checks ───────────────────────────────────────
+    if (is_cat) {
+      if (n_groups < 2) { message("Skipping ", pred, " — < 2 groups"); next }
+      if (any(table(x) < 3)) { message("Skipping ", pred, " — group with < 3 obs"); next }
+      if (any(tapply(y, x, var, na.rm = TRUE) == 0, na.rm = TRUE)) {
+        message("Skipping ", pred, " — zero variance group"); next }
+    } else {
+      if (n < 8 || sd(x) == 0) {
+        message("Skipping ", pred, " — n too small or zero variance"); next }
+    }
+    
+    df_mod  <- data.frame(y = y, x = x, cov_data)
+    
+    # ── Fit models ────────────────────────────────────────
+    mod <- tryCatch(
+      lm(as.formula(paste("y ~ x +", cov_formula_str)), data = df_mod),
+      error = function(e) { message("Model failed for ", pred); NULL })
+    if (is.null(mod)) next
+    
+    mod_cov <- lm(as.formula(paste("y ~", cov_formula_str)), data = df_mod)
+    s       <- summary(mod)
+    
+    coef_rows <- rownames(coef(s))[startsWith(rownames(coef(s)), "x")]
+    if (length(coef_rows) == 0 || all(is.na(coef(s)[coef_rows, "Estimate"]))) {
+      message("Skipping ", pred, " — coefficient aliased or NA"); next
+    }
+    
+    # ── Effect size ───────────────────────────────────────
+    eta  <- tryCatch(effectsize::eta_squared(mod, partial = TRUE), error = function(e) NULL)
+    eta2 <- tryCatch({
+      if (!is.null(eta)) {
+        val <- eta$Eta2_partial[eta$Parameter == "x"]
+        if (length(val) == 0 || !is.numeric(val)) NA else as.numeric(val)
+      } else NA
+    }, error = function(e) NA)
+    
+    if (is_cat) {
+      
+      # ── p-value via Anova type III — same as old function ─
+      aov3   <- tryCatch(car::Anova(mod, type = "III"), error = function(e) NULL)
+      f_stat <- if (!is.null(aov3) && "x" %in% rownames(aov3)) aov3["x", "F value"] else NA
+      p_val  <- if (!is.null(aov3) && "x" %in% rownames(aov3)) aov3["x", "Pr(>F)"]  else NA
+      
+      # Fallback to standard F if Anova type III fails
+      if (is.na(p_val)) {
+        aov_s  <- tryCatch(summary(aov(as.formula(paste("y ~ x +", cov_formula_str)), data = df_mod)),
+                           error = function(e) NULL)
+        f_stat <- if (!is.null(aov_s)) aov_s[[1]]["x", "F value"] else NA
+        p_val  <- if (!is.null(aov_s)) aov_s[[1]]["x", "Pr(>F)"]  else NA
+      }
+      
+      # ── Assumption checks ─────────────────────────────────
+      sw  <- tryCatch(shapiro.test(residuals(mod)), error = function(e) list(p.value = NA))
+      bp  <- tryCatch(bptest(mod),                  error = function(e) list(p.value = NA))
+      lev <- tryCatch(leveneTest(y ~ x),             error = function(e) data.frame(`Pr(>F)` = NA))
+      sw_p <- ifelse(is.na(sw$p.value), 0, sw$p.value)
+      bp_p <- ifelse(is.na(bp$p.value), 0, bp$p.value)
+      lev_p <- lev$`Pr(>F)`[1]
+      assumptions_ok <- sw_p > alpha & bp_p > alpha & !is.na(lev_p) & lev_p > alpha
+      
+      # ── Slope homogeneity ─────────────────────────────────
+      cont_covs  <- covariates[sapply(covariates, function(v) is.numeric(df_mod[[v]]))]
+      if (length(cont_covs) > 0) {
+        other_covs  <- setdiff(covariates, cont_covs[1])
+        int_formula <- if (length(other_covs) == 0) {
+          as.formula(paste("y ~ x *", cont_covs[1]))
+        } else {
+          as.formula(paste("y ~ x *", cont_covs[1], "+",
+                           paste(other_covs, collapse = " + ")))
+        }
+        mod_int   <- tryCatch(lm(int_formula, data = df_mod), error = function(e) NULL)
+        p_slopes  <- if (!is.null(mod_int)) anova(mod, mod_int)$`Pr(>F)`[2] else NA
+        slopes_ok <- !is.na(p_slopes) & p_slopes > alpha
+      } else {
+        p_slopes <- NA; slopes_ok <- NA
+      }
+      
+      # ── LM estimates ──────────────────────────────────────
+      lm_coefs <- coef(mod)[coef_rows]
+      cov_ests <- sapply(covariates, function(v) {
+        est <- round(coef(mod)[v], 4)
+        paste0(v, ": ", ifelse(est > 0, paste0("+", est), est))
+      })
+      estimates_str <- paste0(
+        paste(cov_ests, collapse = " | "), " | ref=", levels(x)[1], " | ",
+        paste(paste0(gsub("^x", "", names(lm_coefs)), ": ",
+                     ifelse(lm_coefs > 0, paste0("+", round(lm_coefs, 3)),
+                            round(lm_coefs, 3))), collapse = " | "))
+      
+      results[[pred]] <- data.frame(
+        predictor            = pred, type = "categorical",
+        covariates           = paste(covariates, collapse = " + "),
+        n = n, n_groups = n_groups, estimates = estimates_str,
+        f_statistic          = round(f_stat, 4),
+        p_value              = round(p_val, 4),
+        partial_eta2         = ifelse(is.numeric(eta2) & length(eta2) == 1, round(eta2, 4), NA),
+        shapiro_p            = round(sw_p, 4),
+        breusch_pagan_p      = round(bp_p, 4),
+        levene_p             = round(lev_p, 4),
+        slopes_homogeneity_p = round(p_slopes, 4),
+        slopes_ok            = slopes_ok,
+        assumptions_ok       = assumptions_ok,
+        r2_full              = round(s$r.squared, 4),
+        r2_increment         = round(s$r.squared - summary(mod_cov)$r.squared, 4),
+        significance         = ifelse(p_val < 0.001, "***",
+                                      ifelse(p_val < 0.01,  "**",
+                                             ifelse(p_val < 0.05,  "*", "ns")))
+      )
+      
+    } else {
+      
+      # ── Continuous predictor ──────────────────────────────
+      sw   <- tryCatch(shapiro.test(residuals(mod)), error = function(e) list(p.value = NA))
+      bp   <- tryCatch(bptest(mod),                  error = function(e) list(p.value = NA))
+      sw_p <- ifelse(is.na(sw$p.value), 0, sw$p.value)
+      bp_p <- ifelse(is.na(bp$p.value), 0, bp$p.value)
+      p_val <- coef(s)["x", "Pr(>|t|)"]
+      
+      results[[pred]] <- data.frame(
+        predictor            = pred, type = "continuous",
+        covariates           = paste(covariates, collapse = " + "),
+        n = n, n_groups = NA,
+        estimates            = paste0("β = ", round(coef(mod)["x"], 4)),
+        f_statistic          = NA,
+        p_value              = round(p_val, 4),
+        partial_eta2         = ifelse(is.numeric(eta2) & length(eta2) == 1, round(eta2, 4), NA),
+        shapiro_p            = round(sw_p, 4),
+        breusch_pagan_p      = round(bp_p, 4),
+        levene_p             = NA,
+        slopes_homogeneity_p = NA,
+        slopes_ok            = NA,
+        assumptions_ok       = sw_p > alpha & bp_p > alpha,
+        r2_full              = round(s$r.squared, 4),
+        r2_increment         = round(s$r.squared - summary(mod_cov)$r.squared, 4),
+        significance         = ifelse(p_val < 0.001, "***",
+                                      ifelse(p_val < 0.01,  "**",
+                                             ifelse(p_val < 0.05,  "*", "ns")))
+      )
+    }
+  }
+  
+  df_results <- do.call(rbind, results) %>% arrange(p_value)
+  
+  # ── FDR correction ────────────────────────────────────────
+  valid_p <- !is.na(df_results$p_value)
+  df_results$p_value_adj <- NA
+  df_results$p_value_adj[valid_p] <- p.adjust(
+    df_results$p_value[valid_p], method = "BH")
+  
+  df_results$significance_adj <- ifelse(
+    is.na(df_results$p_value_adj), NA,
+    ifelse(df_results$p_value_adj < 0.001, "***",
+           ifelse(df_results$p_value_adj < 0.01,  "**",
+                  ifelse(df_results$p_value_adj < 0.05,  "*", "ns"))))
+  
+  return(df_results)
+}
+
+
+extract_robust_pvalues <- function(mod) {
+  s <- summary(mod); coefs <- s$coefficients
+  n <- nrow(mod$model); k <- length(coef(mod))
+  t_vals <- coefs[, "t value"]
+  p_vals <- 2 * pt(abs(t_vals), df = n - k, lower.tail = FALSE)
+  data.frame(term = rownames(coefs), estimate = round(coefs[, "Value"], 4),
+             std_error = round(coefs[, "Std. Error"], 4), t_value = round(t_vals, 4),
+             p_value = round(p_vals, 4),
+             sig = ifelse(p_vals < 0.001, "***", ifelse(p_vals < 0.01, "**",
+                                                        ifelse(p_vals < 0.05, "*", ifelse(p_vals < 0.1, ".", "ns"))))) %>%
+    `rownames<-`(NULL)
+}
+
+plot_ancova_results <- function(results, df, outcome = "log_GDF15",
+                                forced_covariates = "age",
+                                alpha = 0.05,
+                                boxplot = FALSE) {
+  library(patchwork)
+  
+  # ── Filter significant results ────────────────────────────
+  results_sig <- results %>% filter(p_value < alpha)
+  
+  if (nrow(results_sig) == 0) {
+    cat("No significant results to plot.\n"); return(invisible(NULL))
+  }
+  
+  # Continuous covariate for x axis
+  cont_covar <- forced_covariates[sapply(forced_covariates,
+                                         function(v) is.numeric(df[[v]]))]
+  plots <- list()
+  
+  for (i in seq_len(nrow(results_sig))) {
+    
+    pred     <- results_sig$predictor[i]
+    p_val    <- results_sig$p_value[i]
+    p_adj    <- if ("p_value_adj" %in% names(results_sig))
+      results_sig$p_value_adj[i] else NA
+    sig      <- results_sig$significance[i]
+    sig_adj  <- if ("significance_adj" %in% names(results_sig))
+      results_sig$significance_adj[i] else NA
+    eta2     <- results_sig$partial_eta2[i]
+    est      <- results_sig$estimates[i]
+    is_cat   <- results_sig$type[i] == "categorical"
+    
+    # ── Get data and fit model ────────────────────────────
+    x   <- df[[pred]]
+    y   <- df[[outcome]]
+    cov_data <- df[, forced_covariates, drop = FALSE]
+    
+    valid <- complete.cases(x, y, cov_data)
+    x        <- if (is_cat) droplevels(as.factor(x[valid])) else x[valid]
+    y        <- y[valid]
+    cov_data <- cov_data[valid, , drop = FALSE]
+    cov_x    <- cov_data[[cont_covar[1]]]
+    
+    df_plot  <- data.frame(x = x, y = y, cov_x = cov_x, cov_data)
+    n_groups <- if (is_cat) nlevels(x) else NA
+    
+    # ── Beta display : "Variable: +0.248" ─────────────────────
+    beta_display <- if (results_sig$type[i] == "categorical") {
+      parts    <- strsplit(est, " \\| ")[[1]]
+      non_ref  <- parts[!startsWith(parts, "ref=") &
+                          !grepl(paste(forced_covariates, collapse = "|"), parts)]
+      # Add predictor name before each level
+      paste(paste0(pred, " = ", non_ref), collapse = "\n")
+    } else {
+      paste0(pred, " = ", est)  # "FAGERS β = 0.072"
+    }
+    
+    p_label     <- ifelse(p_val < 0.001, "p         < 0.001",
+                          paste0("  p = ", round(p_val, 3)))
+    p_adj_label <- if (!is.na(p_adj))
+      ifelse(p_adj < 0.001, "p(FDR) < 0.001",
+             paste0("p(FDR) = ", round(p_adj, 3))) else ""
+    
+    sig_str     <- paste0(" ", sig)
+    sig_adj_str <- if (!is.na(p_adj)) paste0(" ", sig_adj) else ""
+    
+    annot_label <- paste0(
+      beta_display,
+      "\n", p_label, sig_str,
+      if (p_adj_label != "") paste0("\n", p_adj_label, sig_adj_str) else ""
+    )
+    
+    # ── Annotation 
+    annotate("text", x = -Inf, y = Inf,
+             label    = annot_label,
+             hjust    = -0.05,
+             vjust    = 1.3,
+             size     = 3.2,
+             fontface = "italic",
+             family   = "mono",     
+             color    = "grey20")
+    
+    group_colors <- if (is_cat) {
+      facebd_groups[seq_len(n_groups)]
+    } else NULL
+    
+    if (boxplot & is_cat) {
+      
+      # ── Boxplot of adjusted values ───────────────────────
+      cov_formula   <- as.formula(paste("y ~", paste(forced_covariates, collapse = " + ")))
+      mod_cov       <- lm(cov_formula, data = df_plot)
+      df_plot$y_adj <- residuals(mod_cov) + mean(y)
+      
+      p <- ggplot(df_plot, aes(x = x, y = y_adj, fill = x)) +
+        geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.5) +
+        geom_jitter(aes(color = x), width = 0.15, size = 2, alpha = 0.6) +
+        scale_fill_manual(values  = group_colors, guide = "none") +
+        scale_color_manual(values = group_colors, guide = "none") +
+        annotate("text", x = -Inf, y = Inf, label = annot_label,
+                 hjust = -0.1, vjust = 1.3, size = 3.2,
+                 fontface = "italic", color = "grey20") +
+        labs(
+          title    = paste0("Effect of ", pred),
+          subtitle = paste0("Adjusted for ", forced_covariates),
+          x = pred,
+          y = outcome
+        ) +
+        theme_minimal(base_size = 11) +
+        theme(plot.title       = element_text(face = "bold", size = 12),
+              plot.subtitle    = element_text(size = 10, color = "grey40"),
+              panel.grid.minor = element_blank(),
+              axis.text.x      = element_text(angle = 20, hjust = 1))
+      
+    } else if (!is_cat) {
+      
+      # ── Scatter plot for continuous predictors ────────────
+      p <- ggplot(df_plot, aes(x = x, y = y)) +
+        geom_point(alpha = 0.6, size = 2.5, color = "grey40") +
+        geom_smooth(method = "lm", se = TRUE,
+                    color = "#1565C0", fill = "#1565C0", alpha = 0.15) +
+        annotate("text", x = -Inf, y = Inf, label = annot_label,
+                 hjust = -0.1, vjust = 1.3, size = 3.2,
+                 fontface = "italic", color = "grey20") +
+        labs(title = paste0(pred, " → ", outcome, " | adjusted for ",
+                            paste(forced_covariates, collapse = " + ")),
+             x = pred, y = outcome) +
+        theme_minimal(base_size = 11) +
+        theme(plot.title       = element_text(face = "bold", size = 12),
+              panel.grid.minor = element_blank())
+      
+    } else {
+      
+      # ── Scatter plot with regression lines per group ──────
+      p <- ggplot(df_plot, aes(x = cov_x, y = y, color = x, fill = x)) +
+        geom_point(alpha = 0.6, size = 2.5) +
+        geom_smooth(method = "lm", se = TRUE, alpha = 0.15) +
+        scale_color_manual(values = group_colors, name = pred) +
+        scale_fill_manual(values  = group_colors, name = pred) +
+        annotate("text", x = -Inf, y = Inf, label = annot_label,
+                 hjust = -0.1, vjust = 1.3, size = 3.2,
+                 fontface = "italic", color = "grey20") +
+        labs(title = paste0(pred, " → ", outcome, " | adjusted for ",
+                            paste(forced_covariates, collapse = " + ")),
+             x = cont_covar[1], y = outcome) +
+        theme_minimal(base_size = 11) +
+        theme(plot.title       = element_text(face = "bold", size = 12),
+              panel.grid.minor = element_blank(),
+              legend.position  = "top")
+    }
+    
+    plots[[pred]] <- p
+  }
+  
+  wrap_plots(plots, ncol = 2) 
+}
+
+
+export_results_table <- function(results, filename, title = "ANCOVA Results",
+                                 alpha = 0.05) {
+  library(gt)
+  
+  is_grouped <- "group" %in% names(results)
+  
+  results_sig <- results %>%
+    filter(p_value < alpha) %>%
+    mutate(
+      p_value      = ifelse(p_value < 0.001, "< 0.001",
+                            as.character(round(p_value, 3))),
+      p_value_adj  = ifelse(!is.na(p_value_adj) & as.numeric(p_value_adj) < 0.001,
+                            "< 0.001",
+                            as.character(round(as.numeric(p_value_adj), 3))),
+      partial_eta2 = round(partial_eta2, 3),
+      r2_increment = round(r2_increment, 3)
+    )
+  
+  if (nrow(results_sig) == 0) {
+    cat("No significant results to export.\n"); return(invisible(NULL))
+  }
+  
+  
+  cols_to_show <- intersect(
+    c("group", "predictor", "covariates", "n", "estimates",
+      "p_value", "p_value_adj", "partial_eta2", "r2_increment",
+      "significance", "significance_adj"),
+    names(results_sig)
+  )
+  results_sig <- results_sig %>% dplyr::select(all_of(cols_to_show))
+  
+  tbl <- if (is_grouped) {
+    results_sig %>% gt(groupname_col = "group")
+  } else {
+    results_sig %>% gt()
+  }
+  
+  tbl <- tbl %>%
+    tab_header(title = title,
+               subtitle = paste0("Significant results only (p < ", alpha, ")")) %>%
+    cols_label(
+      predictor        = "Predictor (pg/mL)",
+      covariates       = "Adjusted for",
+      n                = "N",
+      estimates        = "Estimates",
+      p_value          = "p-value",
+      p_value_adj      = "p-value (FDR)",
+      partial_eta2     = "Partial η²",
+      r2_increment     = "ΔR²",
+      significance     = "Sig.",
+      significance_adj = "Sig. (FDR)"
+    ) %>%
+    cols_hide(columns = any_of(c("type", "n_groups", "f_statistic", "shapiro_p",
+                                 "levene_p", "breusch_pagan_p", "slopes_homogeneity_p",
+                                 "slopes_ok", "assumptions_ok", "r2_full"))) %>%
+    # Header colonnes
+    tab_style(
+      style = list(cell_fill(color = facebd_colors$dark_burgundy),
+                   cell_text(color = "white", weight = "bold")),
+      locations = cells_column_labels()
+    ) %>%
+    # Header groupes
+    tab_style(
+      style = list(cell_fill(color = "#F2B8CC"),                  
+                   cell_text(color = facebd_colors$dark_burgundy,
+                             weight = "bold")),
+      locations = cells_row_groups()
+    ) %>%
+    # Stars significatives
+    tab_style(
+      style = cell_text(weight = "bold", color = facebd_colors$dark_burgundy),
+      locations = cells_body(columns = significance,
+                             rows = significance %in% c("*", "**", "***"))
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold", color = facebd_colors$dark_burgundy),
+      locations = cells_body(columns = significance_adj,
+                             rows = significance_adj %in% c("*", "**", "***"))
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold", size = 16),
+      locations = cells_title(groups = "title")) %>%
+    opt_row_striping() %>%
+    tab_options(table.font.size = 12, table.width = pct(100)) %>%
+    tab_source_note(
+      source_note = paste0(
+        "Outcome: log10(GDF15) | Covariates: ",
+        paste(unique(results$covariates), collapse = ", ")
+      )
+    )
+  
+  gtsave(tbl, filename = filename)
+  cat("Table exported to:", filename, "\n")
+  return(invisible(tbl))
+}
+
+
+# ════════════════════════════════════════════════════════
+# REGRESSION - CATEGORICAL AND CONTINUOUS
+# ════════════════════════════════════════════════════════
+
+# ── Log transformation ──────────────────────────────────
+df_trans$log_GDF15 <- log10(df_trans$`GDF15 pg/ml`)
+
+###################### USAGE FOR GDF15 with categorical data ######################
+
+df_clinical_cat <- df_trans[c("arm", "edulevel", "Antidepressants_treat", "Anxiolytics_treat", "Lithium_treat",
+                              "Antipsychotics_treat", "Thymoregulators_treat", "cyclerap", "saison", "rad_tb_subst", "suoccur_alcool", "suoccur_cannabis", "current smokers", "remitted smokers", "log_GDF15", "age")]
+names(df_clinical_cat) <- c("BD subtype", "Education level", "Antidepressants treatment", "Anxiolytics treatment", "Lithium treatment",
+                            "Antipsychotics treatment", "Thymoregulators treatment", "Rapid cycling", "Season", "Substance use disorder", "Alcohol use disorder", "Cannabis use disorder", "Current smokers", "Remitted smokers", "GDF15 [log10(pg/mL)]", "Age")
+
+
+cat_vars <- df_trans[, 4:203] %>%
+  dplyr::select(where(~ is.factor(.) | is.character(.))) %>% names()
+
+
+# ── Replace groups < 3 obs with NA ───────
+df_clinical_cat <- df_clinical_cat %>%
+  mutate(
+    `Education level` = {
+      x <- as.factor(`Education level`)
+      group_sizes <- table(x)
+      small_groups <- names(group_sizes[group_sizes < 3])
+      ifelse(`Education level` %in% small_groups, NA, `Education level`)
+    }
+  )
+
+results_ancova <- run_ancova(
+  df        = df_clinical_cat,
+  outcome   = "GDF15 [log10(pg/mL)]",
+  covariate = "Age"
+)
+cat("\n=== Significant ANCOVA results (p < 0.05) ===\n")
+print(results_ancova %>% filter(p_value < 0.05))
+
+df_anc <- df_clinical_cat %>%
+  dplyr::select(all_of(c("GDF15 [log10(pg/mL)]", "BD subtype", "Lithium treatment", "Age"))) %>%
+  filter(complete.cases(.))
+
+best_formula_clinical_ancova <- formula(step(
+  lm(`GDF15 [log10(pg/mL)]` ~ `BD subtype` + `Lithium treatment`+ Age, data = df_anc),
+  direction = "both"
+))
+print(best_formula_clinical_ancova)
+
+mod_ancova <- lm(best_formula_clinical_ancova, data = df_clinical_cat)
+summary(mod_ancova)
+
+ggsave("outcome/scatterplot_color_ancova_clinical_GDF15.png",
+       plot_ancova_results(results_ancova, df_clinical_cat, "GDF15 [log10(pg/mL)]", "Age"),
+       width = 12, height = 8, dpi = 300, bg = "white")
+
+ggsave("outcome/boxplot_color_ancova_clinical_GDF15.png",
+       plot_ancova_results(results_ancova, df_clinical_cat, "GDF15 [log10(pg/mL)]", "Age", boxplot = TRUE),
+       width = 12, height = 8, dpi = 300, bg = "white")
+
+
+
+###################### USAGE FOR GDF15 with continuous data ######################
+
+
+# Adjusted regression on all continuous variables
+
+# ── Run ANCOVA on each subgroup for both adjustments ──────
+df_list <- list(
+  "Blood cells"  = df_blood,
+  "Inflammation" = df_infla,
+  "KYN pathway"  = df_kyn,
+  "Metabolism"   = df_metabo,
+  "Clinical"     = df_clinical
+)
+
+rename_map <- c(
+  "age"           = "Age",
+  "Lithium_treat" = "Lithium treatment",
+  "log_GDF15"     = "Log(GDF15)"
+)
+
+for (covs in list(c("age"), c("age", "Lithium_treat"))) {
+  
+  cov_label <- paste(covs, collapse = " + ")
+  cat("\n══════════════════════════════════════════\n")
+  cat("Running ANCOVA adjusted for:", cov_label, "\n")
+  cat("══════════════════════════════════════════\n")
+  
+  results_by_group <- do.call(rbind, lapply(names(df_list), function(group_name) {
+    df_sub <- df_list[[group_name]] %>%
+      dplyr::select(-any_of(c("GDF15", "GDF15 pg/ml"))) 
+    df_sub$log_GDF15 <- df_trans$log_GDF15
+    
+    for (cov in covs) df_sub[[cov]] <- df_trans[[cov]]
+    
+    res <- tryCatch(
+      run_ancova(df = df_sub, outcome = "log_GDF15", covariates = covs),
+      error = function(e) { message("Error for ", group_name, ": ", e$message); NULL }
+    )
+    if (!is.null(res) && nrow(res) > 0) { res$group <- group_name; res }
+  })) %>%
+    filter(!predictor %in% covs) %>%
+    distinct(predictor, group, .keep_all = TRUE) %>%
+    # ── Apply display names ────────────────────────────────
+    mutate(
+      predictor  = ifelse(predictor %in% names(rename_map),
+                          rename_map[predictor], predictor),
+      covariates = sapply(covariates, function(cov_str) {
+        for (old in names(rename_map)) {
+          cov_str <- gsub(old, rename_map[old], cov_str, fixed = TRUE)
+        }
+        cov_str
+      }),
+      estimates = sapply(estimates, function(est_str) {
+        for (old in names(rename_map)) {
+          est_str <- gsub(old, rename_map[old], est_str, fixed = TRUE)
+        }
+        est_str
+      })
+    ) %>%
+    arrange(group, p_value)
+  
+  cat("\n=== Significant results (p < 0.05) ===\n")
+  print(results_by_group %>% filter(p_value < 0.05) %>%
+          dplyr::select(group, predictor, p_value, p_value_adj, significance_adj))
+  
+  # ── Display names for covariates in title ────────────────
+  cov_label_display <- paste(
+    sapply(covs, function(c) ifelse(c %in% names(rename_map), rename_map[c], c)),
+    collapse = " + "
+  )
+  cov_filename <- gsub(" \\+ ", "_", cov_label)
+  
+  group_order <- c("Clinical", "Blood cells", "Inflammation",
+                   "KYN pathway", "Metabolism")
+  
+  results_by_group <- results_by_group %>%
+    mutate(group = factor(group, levels = group_order)) %>%
+    arrange(group, p_value)
+  
+  export_results_table(
+    results  = results_by_group,
+    filename = paste0("outcome/table_color_ancova_adj_", cov_filename, "_GDF15.png"),
+    title    = paste0("ANCOVA — GDF15 [log10(pg/mL)] adjusted for ", cov_label_display)
+  )
+}
