@@ -38,6 +38,14 @@ facebd_groups <- c(
 # ════════════════════════════════════════════════════════
 
 df_trans <- read_excel("data/final_merged_data_samples_V0.xlsx")
+df_mito <- read_excel("data/MitoBDPRS.xlsx")
+
+# Add MitoPRS
+df_mito <- df_mito %>%
+  mutate(ID_padded = stringr::str_pad(as.character(ID), width = 10, side = "left", pad = "0"))
+
+df_trans <- df_trans %>%
+  left_join(df_mito, by = c("fondacode" = "ID_padded"))
 
 # Remove columns with same values (limit of detection)
 df_trans <- subset(df_trans, select = -c(IL_4, IL_2, IL_1beta, IL_1alpha))
@@ -287,7 +295,7 @@ combine_strip_plots <- function(plot_list, group_labels, results_list, strip_var
                                 title = "Spearman correlations with GDF15 pg/mL",
                                 label_fill = facebd_groups,
                                 label_color = "white", rel_widths = NULL,
-                                label_text_size = 5, legend_width = 1) {
+                                label_text_size = 5.5, legend_width = 1) {
   all_rhos <- lapply(results_list, function(res) {
     res %>% filter(sapply(strsplit(pair, " ~ "), `[`, 1) == strip_var |
                      sapply(strsplit(pair, " ~ "), `[`, 2) == strip_var) %>% pull(spearman_rho)
@@ -332,8 +340,8 @@ combine_strip_plots <- function(plot_list, group_labels, results_list, strip_var
     cowplot::plot_grid(
       cowplot::ggdraw() + cowplot::draw_label(title, fontface = "bold", size = 18, x = 0.01, hjust = 0),
       cowplot::ggdraw() + cowplot::draw_label(
-        "Stars based on FDR-adjusted p: * p<.05  ** p<.01  *** p<.001 | Biological variables in pg/mL",
-        size = 16, color = "grey40", x = 0.01, hjust = 0),
+        "Stars based on FDR-adjusted p: * p<.05  ** p<.01  *** p<.001",
+        size = 18, color = "grey40", x = 0.01, hjust = 0),
       ncol = 1, rel_heights = c(1, 0.6)),
     combined_with_legend, ncol = 1, rel_heights = c(0.08, 1))
 }
@@ -357,7 +365,7 @@ names(df_metabo) <- c("Triglycerides", "Glycemia", "Total Cholesterol", "HDL Cho
                       "Creatinine", "Lactate", "GDF15")
 
 df_kyn <- df_trans[c("TRP", "KYN", "OHKYN", "KA", "QUINA", "XA", "AA", "QUINO", "PICO", "GDF15 pg/ml")]
-names(df_kyn) <- c("Tryptophan", "Kynurenine", "3-Hydroxykynurenine", "Kynurenic acid",
+names(df_kyn) <- c("Tryptophan", "Kynurenine", "3-HK", "Kynurenic acid",
                    "Quinaldic acid", "Xanthurenic acid", "Anthranilic acid",
                    "Quinolinic acid", "Picolinic acid", "GDF15")
 
@@ -367,9 +375,9 @@ names(df_blood) <- c("Red Blood Cells", "Platelets", "Monocytes", "Lymphocytes",
                      "Eosinophils", "Basophils", "Neutrophils", "White Blood Cells", "GDF15")
 
 df_clinical <- df_trans[, c("bmi", "age", "madrs_", "ymrs_num", "fagers", "fast_", "bis10",
-                             "staya", "mars_", "mathys_", "psqi_", "als_", "ctq39", "qidsr120", "GDF15 pg/ml")]
+                             "staya", "mars_", "mathys_", "psqi_", "als_", "ctq39", "GDF15 pg/ml")]
 names(df_clinical) <- c("BMI", "Age", "MADRS", "YMRS", "FAGERS", "FAST", "BIS",
-                        "STAY-A", "MARS", "MATHYS", "PSQI", "ALS", "CTQ", "QIDS", "GDF15")
+                        "STAI", "MARS", "MATHYS", "PSQI", "ALS", "CTQ", "GDF15")
 
 # ── Run pairwise Spearman ─────────────────────────────────
 run_and_plot_spearman <- function(df_sub, strip_var = "GDF15",
@@ -675,61 +683,105 @@ extract_robust_pvalues <- function(mod) {
 plot_ancova_results <- function(results, df, outcome = "log_GDF15",
                                 forced_covariates = "age",
                                 alpha = 0.05,
-                                boxplot = FALSE) {
+                                boxplot = FALSE,
+                                force_predictors = NULL,
+                                drop_levels = NULL) {
   library(patchwork)
   
-  # ── Filter significant results ────────────────────────────
-  results_sig <- results %>% filter(p_value < alpha)
+  # ── Filter results ────────────────────────────────────────
+  if (!is.null(force_predictors)) {
+    results_sig <- results %>% filter(predictor %in% force_predictors)
+  } else {
+    results_sig <- results %>% filter(p_value < alpha)
+  }
   
   if (nrow(results_sig) == 0) {
     cat("No significant results to plot.\n"); return(invisible(NULL))
   }
   
-  # Continuous covariate for x axis
   cont_covar <- forced_covariates[sapply(forced_covariates,
                                          function(v) is.numeric(df[[v]]))]
   plots <- list()
   
   for (i in seq_len(nrow(results_sig))) {
     
-    pred     <- results_sig$predictor[i]
-    p_val    <- results_sig$p_value[i]
-    p_adj    <- if ("p_value_adj" %in% names(results_sig))
+    pred    <- results_sig$predictor[i]
+    p_val   <- results_sig$p_value[i]
+    p_adj   <- if ("p_value_adj" %in% names(results_sig))
       results_sig$p_value_adj[i] else NA
-    sig      <- results_sig$significance[i]
-    sig_adj  <- if ("significance_adj" %in% names(results_sig))
+    sig     <- results_sig$significance[i]
+    sig_adj <- if ("significance_adj" %in% names(results_sig))
       results_sig$significance_adj[i] else NA
-    eta2     <- results_sig$partial_eta2[i]
-    est      <- results_sig$estimates[i]
-    is_cat   <- results_sig$type[i] == "categorical"
+    eta2    <- results_sig$partial_eta2[i]
+    est     <- results_sig$estimates[i]
+    is_cat  <- results_sig$type[i] == "categorical"
     
-    # ── Get data and fit model ────────────────────────────
-    x   <- df[[pred]]
-    y   <- df[[outcome]]
+    x        <- df[[pred]]
+    y        <- df[[outcome]]
     cov_data <- df[, forced_covariates, drop = FALSE]
     
-    valid <- complete.cases(x, y, cov_data)
+    valid    <- complete.cases(x, y, cov_data)
     x        <- if (is_cat) droplevels(as.factor(x[valid])) else x[valid]
     y        <- y[valid]
     cov_data <- cov_data[valid, , drop = FALSE]
     cov_x    <- cov_data[[cont_covar[1]]]
     
+    if (is_cat && pred %in% names(drop_levels)) {
+      levels_to_drop <- drop_levels[[pred]]
+      keep     <- !x %in% levels_to_drop
+      x        <- droplevels(x[keep])
+      y        <- y[keep]
+      cov_data <- cov_data[keep, , drop = FALSE]
+      cov_x    <- cov_data[[cont_covar[1]]]
+    }
+    
     df_plot  <- data.frame(x = x, y = y, cov_x = cov_x, cov_data)
     n_groups <- if (is_cat) nlevels(x) else NA
     
-    # ── Beta display : "Variable: +0.248" ─────────────────────
-    beta_display <- if (results_sig$type[i] == "categorical") {
-      parts    <- strsplit(est, " \\| ")[[1]]
-      non_ref  <- parts[!startsWith(parts, "ref=") &
-                          !grepl(paste(forced_covariates, collapse = "|"), parts)]
-      # Add predictor name before each level
-      paste(paste0(pred, " = ", non_ref), collapse = "\n")
+    if (is_cat) {
+      n_per_group <- table(x)
+      # Rename x-axis labels to include n per group
+      x_labels <- setNames(
+        paste0(names(n_per_group), "\n(n=", n_per_group, ")"),
+        names(n_per_group)
+      )
     } else {
-      paste0(pred, " = ", est)  # "FAGERS β = 0.072"
+      n_total     <- length(y)
     }
     
-    p_label     <- ifelse(p_val < 0.001, "p         < 0.001",
-                          paste0("  p = ", round(p_val, 3)))
+    # ── Extract covariate betas ───────────────────────────
+    cov_betas_str <- {
+      parts     <- strsplit(est, " \\| ")[[1]]
+      cov_parts <- parts[sapply(forced_covariates, function(cv)
+        startsWith(parts, paste0(cv, ":")))]
+      if (length(cov_parts) > 0) {
+        cov_parts_rounded <- sapply(cov_parts, function(cp) {
+          colon_split <- strsplit(cp, ": ")[[1]]
+          name_part   <- colon_split[1]
+          num         <- as.numeric(colon_split[2])
+          rounded     <- round(num, 3)
+          formatted   <- formatC(abs(rounded), format = "f", digits = 3)
+          paste0(name_part, " = ", ifelse(rounded >= 0, "+", "-"), formatted)
+        })
+        paste(cov_parts_rounded, collapse = "\n")
+      } else ""
+    }
+    
+    beta_display <- if (is_cat) {
+      parts   <- strsplit(est, " \\| ")[[1]]
+      non_ref <- parts[!startsWith(parts, "ref=") &
+                         !grepl(paste(forced_covariates, collapse = "|"), parts)]
+      if (pred %in% names(drop_levels)) {
+        levels_to_drop <- drop_levels[[pred]]
+        non_ref <- non_ref[!grepl(paste(levels_to_drop, collapse = "|"), non_ref)]
+      }
+      paste(paste0(pred, " = ", non_ref), collapse = "\n")
+    } else {
+      paste0(pred, " = ", est)
+    }
+    
+    p_label     <- ifelse(p_val < 0.001, "p < 0.001",
+                          paste0("p = ", round(p_val, 3)))
     p_adj_label <- if (!is.na(p_adj))
       ifelse(p_adj < 0.001, "p(FDR) < 0.001",
              paste0("p(FDR) = ", round(p_adj, 3))) else ""
@@ -738,28 +790,16 @@ plot_ancova_results <- function(results, df, outcome = "log_GDF15",
     sig_adj_str <- if (!is.na(p_adj)) paste0(" ", sig_adj) else ""
     
     annot_label <- paste0(
+      if (nchar(cov_betas_str) > 0) paste0(cov_betas_str, "\n") else "",
       beta_display,
       "\n", p_label, sig_str,
       if (p_adj_label != "") paste0("\n", p_adj_label, sig_adj_str) else ""
     )
     
-    # ── Annotation 
-    annotate("text", x = -Inf, y = Inf,
-             label    = annot_label,
-             hjust    = -0.05,
-             vjust    = 1.3,
-             size     = 3.2,
-             fontface = "italic",
-             family   = "mono",     
-             color    = "grey20")
-    
-    group_colors <- if (is_cat) {
-      facebd_groups[seq_len(n_groups)]
-    } else NULL
+    group_colors <- if (is_cat) facebd_groups[seq_len(n_groups)] else NULL
     
     if (boxplot & is_cat) {
       
-      # ── Boxplot of adjusted values ───────────────────────
       cov_formula   <- as.formula(paste("y ~", paste(forced_covariates, collapse = " + ")))
       mod_cov       <- lm(cov_formula, data = df_plot)
       df_plot$y_adj <- residuals(mod_cov) + mean(y)
@@ -769,12 +809,14 @@ plot_ancova_results <- function(results, df, outcome = "log_GDF15",
         geom_jitter(aes(color = x), width = 0.15, size = 2, alpha = 0.6) +
         scale_fill_manual(values  = group_colors, guide = "none") +
         scale_color_manual(values = group_colors, guide = "none") +
+        # ── N per group shown directly on x-axis tick labels
+        scale_x_discrete(labels = x_labels) +
         annotate("text", x = -Inf, y = Inf, label = annot_label,
-                 hjust = -0.1, vjust = 1.3, size = 3.2,
+                 hjust = 0, vjust = 1.3, size = 3.5,
                  fontface = "italic", color = "grey20") +
         labs(
           title    = paste0("Effect of ", pred),
-          subtitle = paste0("Adjusted for ", forced_covariates),
+          subtitle = paste0("Adjusted for ", paste(forced_covariates, collapse = " + ")),
           x = pred,
           y = outcome
         ) +
@@ -782,39 +824,49 @@ plot_ancova_results <- function(results, df, outcome = "log_GDF15",
         theme(plot.title       = element_text(face = "bold", size = 12),
               plot.subtitle    = element_text(size = 10, color = "grey40"),
               panel.grid.minor = element_blank(),
-              axis.text.x      = element_text(angle = 20, hjust = 1))
+              axis.title = element_text(size = 12),
+              axis.text.x      = element_text(angle = 20, hjust = 1, size = 11))
       
     } else if (!is_cat) {
       
-      # ── Scatter plot for continuous predictors ────────────
       p <- ggplot(df_plot, aes(x = x, y = y)) +
         geom_point(alpha = 0.6, size = 2.5, color = "grey40") +
         geom_smooth(method = "lm", se = TRUE,
                     color = "#1565C0", fill = "#1565C0", alpha = 0.15) +
         annotate("text", x = -Inf, y = Inf, label = annot_label,
-                 hjust = -0.1, vjust = 1.3, size = 3.2,
-                 fontface = "italic", color = "grey20") +
-        labs(title = paste0(pred, " → ", outcome, " | adjusted for ",
-                            paste(forced_covariates, collapse = " + ")),
-             x = pred, y = outcome) +
+                 hjust = 0, vjust = 1.3, size = 3.2,
+                 fontface = "italic", family = "mono", color = "grey20") +
+        labs(
+          title = paste0(pred, " → ", outcome, " | adjusted for ",
+                         paste(forced_covariates, collapse = " + ")),
+          x = pred,
+          y = outcome
+        ) +
         theme_minimal(base_size = 11) +
         theme(plot.title       = element_text(face = "bold", size = 12),
               panel.grid.minor = element_blank())
       
     } else {
       
-      # ── Scatter plot with regression lines per group ──────
       p <- ggplot(df_plot, aes(x = cov_x, y = y, color = x, fill = x)) +
         geom_point(alpha = 0.6, size = 2.5) +
         geom_smooth(method = "lm", se = TRUE, alpha = 0.15) +
         scale_color_manual(values = group_colors, name = pred) +
         scale_fill_manual(values  = group_colors, name = pred) +
+        # ── N per group shown in legend labels
+        scale_color_manual(values = group_colors, name = pred,
+                           labels = x_labels) +
+        scale_fill_manual(values  = group_colors, name = pred,
+                          labels = x_labels) +
         annotate("text", x = -Inf, y = Inf, label = annot_label,
-                 hjust = -0.1, vjust = 1.3, size = 3.2,
-                 fontface = "italic", color = "grey20") +
-        labs(title = paste0(pred, " → ", outcome, " | adjusted for ",
-                            paste(forced_covariates, collapse = " + ")),
-             x = cont_covar[1], y = outcome) +
+                 hjust = 0, vjust = 1.3, size = 3.2,
+                 fontface = "italic", family = "mono", color = "grey20") +
+        labs(
+          title = paste0(pred, " → ", outcome, " | adjusted for ",
+                         paste(forced_covariates, collapse = " + ")),
+          x = cont_covar[1],
+          y = outcome
+        ) +
         theme_minimal(base_size = 11) +
         theme(plot.title       = element_text(face = "bold", size = 12),
               panel.grid.minor = element_blank(),
@@ -824,12 +876,37 @@ plot_ancova_results <- function(results, df, outcome = "log_GDF15",
     plots[[pred]] <- p
   }
   
-  wrap_plots(plots, ncol = 2) 
+  # ── Shared Y scale across all panels ─────────────────────
+  wrap_plots(plots, ncol = 2) & scale_y_continuous(limits = range(df[[outcome]], na.rm = TRUE))
+}
+
+to_superscript <- function(n) {
+  supers <- c("\u00b9", "\u00b2", "\u00b3", "\u2074", "\u2075",
+              "\u2076", "\u2077", "\u2078", "\u2079")
+  supers[n]
+}
+
+build_unit_labels <- function(vars, units_map) {
+  relevant    <- units_map[names(units_map) %in% vars]
+  unique_units <- unique(unname(relevant))
+  idx          <- seq_along(unique_units)
+  unit_index   <- setNames(idx, unique_units)
+  
+  label_map <- setNames(vars, vars)
+  for (v in names(relevant)) {
+    u   <- relevant[[v]]
+    sup <- to_superscript(unit_index[[u]])
+    label_map[[v]] <- paste0(v, sup)
+  }
+  
+  legend_lines <- paste0(to_superscript(idx), " ", unique_units)
+  list(label_map = label_map, legend_lines = legend_lines)
 }
 
 
 export_results_table <- function(results, filename, title = "ANCOVA Results",
-                                 alpha = 0.05) {
+                                 alpha = 0.05,
+                                 units_map = NULL) {         
   library(gt)
   
   is_grouped <- "group" %in% names(results)
@@ -850,6 +927,16 @@ export_results_table <- function(results, filename, title = "ANCOVA Results",
     cat("No significant results to export.\n"); return(invisible(NULL))
   }
   
+  if (!is.null(units_map)) {
+    vars_in_table <- unique(results_sig$predictor)
+    ul <- build_unit_labels(vars_in_table, units_map)
+    results_sig <- results_sig %>%
+      mutate(predictor = dplyr::recode(predictor, !!!ul$label_map))
+    unit_footnote <- paste(ul$legend_lines, collapse = "   ")
+  } else {
+    unit_footnote <- NULL
+  }
+  # ───────────────────────────────────────────────────────────────────────────
   
   cols_to_show <- intersect(
     c("group", "predictor", "covariates", "n", "estimates",
@@ -866,17 +953,17 @@ export_results_table <- function(results, filename, title = "ANCOVA Results",
   }
   
   tbl <- tbl %>%
-    tab_header(title = title,
+    tab_header(title    = title,
                subtitle = paste0("Significant results only (p < ", alpha, ")")) %>%
     cols_label(
-      predictor        = "Predictor (pg/mL)",
+      predictor        = "Predictor",         
       covariates       = "Adjusted for",
       n                = "N",
       estimates        = "Estimates",
       p_value          = "p-value",
       p_value_adj      = "p-value (FDR)",
-      partial_eta2     = "Partial η²",
-      r2_increment     = "ΔR²",
+      partial_eta2     = "Partial \u03b7\u00b2",
+      r2_increment     = "\u0394R\u00b2",
       significance     = "Sig.",
       significance_adj = "Sig. (FDR)"
     ) %>%
@@ -891,9 +978,8 @@ export_results_table <- function(results, filename, title = "ANCOVA Results",
     ) %>%
     # Header groupes
     tab_style(
-      style = list(cell_fill(color = "#F2B8CC"),                  
-                   cell_text(color = facebd_colors$dark_burgundy,
-                             weight = "bold")),
+      style = list(cell_fill(color = "#F2B8CC"),
+                   cell_text(color = facebd_colors$dark_burgundy, weight = "bold")),
       locations = cells_row_groups()
     ) %>%
     # Stars significatives
@@ -912,12 +998,19 @@ export_results_table <- function(results, filename, title = "ANCOVA Results",
       locations = cells_title(groups = "title")) %>%
     opt_row_striping() %>%
     tab_options(table.font.size = 12, table.width = pct(100)) %>%
-    tab_source_note(
-      source_note = paste0(
-        "Outcome: log10(GDF15) | Covariates: ",
-        paste(unique(results$covariates), collapse = ", ")
+    tab_footnote(
+      footnote  = "\u00b7 p < 0.10  * p < 0.05  ** p < 0.01  *** p < 0.001",
+      locations = cells_column_labels(columns = significance)
+    ) 
+  
+  if (!is.null(unit_footnote)) {
+    tbl <- tbl %>%
+      tab_footnote(
+        footnote  = unit_footnote,
+        locations = cells_column_labels(columns = predictor)
       )
-    )
+  }
+  # ───────────────────────────────────────────────────────────────────────────
   
   gtsave(tbl, filename = filename)
   cat("Table exported to:", filename, "\n")
@@ -934,14 +1027,10 @@ df_trans$log_GDF15 <- log10(df_trans$`GDF15 pg/ml`)
 
 ###################### USAGE FOR GDF15 with categorical data ######################
 
-df_clinical_cat <- df_trans[c("arm", "edulevel", "Antidepressants_treat", "Anxiolytics_treat", "Lithium_treat",
-                              "Antipsychotics_treat", "Thymoregulators_treat", "cyclerap", "saison", "rad_tb_subst", "suoccur_alcool", "suoccur_cannabis", "current smokers", "remitted smokers", "log_GDF15", "age")]
-names(df_clinical_cat) <- c("BD subtype", "Education level", "Antidepressants treatment", "Anxiolytics treatment", "Lithium treatment",
-                            "Antipsychotics treatment", "Thymoregulators treatment", "Rapid cycling", "Season", "Substance use disorder", "Alcohol use disorder", "Cannabis use disorder", "Current smokers", "Remitted smokers", "GDF15 [log10(pg/mL)]", "Age")
-
-
-cat_vars <- df_trans[, 4:203] %>%
-  dplyr::select(where(~ is.factor(.) | is.character(.))) %>% names()
+df_clinical_cat <- df_trans[c("sex", "arm", "edulevel", "Antidepressants_treat", "Anxiolytics_treat", "Lithium_treat",
+                              "Antipsychotics_treat", "Thymoregulators_treat", "cyclerap", "saison", "rad_tb_subst", "suoccur_alcool", "suoccur_cannabis", "current smokers", "remitted smokers", "Mito_PRS_group", "log_GDF15", "age")]
+names(df_clinical_cat) <- c("Sex", "BD subtype", "Education level", "Antidepressants treatment", "Anxiolytics treatment", "Lithium treatment",
+                            "Antipsychotics treatment", "Thymoregulators treatment", "Rapid cycling", "Season", "Substance use disorder", "Alcohol use disorder", "Cannabis use disorder", "Current smokers", "Remitted smokers", "Mito PRS group", "GDF15 [log10(pg/mL)]", "Age")
 
 
 # ── Replace groups < 3 obs with NA ───────
@@ -976,11 +1065,15 @@ print(best_formula_clinical_ancova)
 mod_ancova <- lm(best_formula_clinical_ancova, data = df_clinical_cat)
 summary(mod_ancova)
 
-ggsave("outcome/scatterplot_color_ancova_clinical_GDF15.png",
+ggsave("outcome/boxplot_color_ancova_clinical_GDF15_ns_numbers.png",
+      plot_ancova_results(results_ancova, df_clinical_cat, "GDF15 [log10(pg/mL)]", "Age", force_predictors = c("Sex", "Mito PRS group"), boxplot = TRUE, drop_levels = list(`Mito PRS group` = "Mid")),
+      width = 12, height = 8, dpi = 300, bg = "white")
+
+ggsave("outcome/scatterplot_color_ancova_clinical_GDF15_numbers.png",
        plot_ancova_results(results_ancova, df_clinical_cat, "GDF15 [log10(pg/mL)]", "Age"),
        width = 12, height = 8, dpi = 300, bg = "white")
 
-ggsave("outcome/boxplot_color_ancova_clinical_GDF15.png",
+ggsave("outcome/boxplot_color_ancova_clinical_GDF15_numbers.png",
        plot_ancova_results(results_ancova, df_clinical_cat, "GDF15 [log10(pg/mL)]", "Age", boxplot = TRUE),
        width = 12, height = 8, dpi = 300, bg = "white")
 
@@ -1064,10 +1157,22 @@ for (covs in list(c("age"), c("age", "Lithium_treat"))) {
   results_by_group <- results_by_group %>%
     mutate(group = factor(group, levels = group_order)) %>%
     arrange(group, p_value)
+
+  units_map <- c(
+    # Blood cells
+    "Neutrophils" = "10\u2079/L",
+    "Basophils"   = "10\u2079/L",
+    "White Blood Cells" = "10\u2079/L",
+    # Inflammation
+    "IL-10"       = "pg/mL",
+    # KYN pathway
+    "Kynurenine"  = "\u00b5M"
+  )
   
   export_results_table(
     results  = results_by_group,
     filename = paste0("outcome/table_color_ancova_adj_", cov_filename, "_GDF15.png"),
-    title    = paste0("ANCOVA — GDF15 [log10(pg/mL)] adjusted for ", cov_label_display)
+    title    = paste0("ANCOVA — GDF15 [log10(pg/mL)] adjusted for ", cov_label_display),
+    units_map = units_map
   )
 }
