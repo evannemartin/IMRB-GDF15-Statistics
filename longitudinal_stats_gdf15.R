@@ -50,19 +50,6 @@ df_filtered <- df_filtered |>
     across(where(~ is.character(.x) && any(grepl("^[<>]", .x))),              ~ as.numeric(ifelse(grepl("^[<>]", .x), NA, gsub(",", ".", .x)))),
     across(where(~ is.factor(.) | is.character(.)),                            ~ ifelse(trimws(.x) %in% na_strings, NA, .x))
   )
-# 
-# # Convert numeric-looking character columns
-# char_cols <- names(df_filtered)[sapply(df_filtered, is.character)]
-# converted <- kept_binary <- c()
-# for (col in char_cols) {
-#   x <- df_filtered[[col]]; non_na <- x[!is.na(x)]
-#   vals <- suppressWarnings(as.numeric(gsub(",", ".", non_na)))
-#   if (length(non_na) > 0 && !any(is.na(vals))) {
-#     if (all(unique(vals) %in% c(0, 1))) { kept_binary <- c(kept_binary, col) }
-#     else { df_filtered[[col]] <- suppressWarnings(as.numeric(gsub(",", ".", x))); converted <- c(converted, col) }
-#   }
-# }
-# df_filtered[sapply(df_filtered, is.logical)] <- lapply(df_filtered[sapply(df_filtered, is.logical)], as.character)
 
 # Lithium treatment
 lithium_data <- read_excel("data/final_merged_data_samples_V0.xlsx") |>
@@ -126,7 +113,6 @@ summary(m1); summary(m1_bis)
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. MAIN VISUALISATION
 # ══════════════════════════════════════════════════════════════════════════════
-
 facebd_colors <- list(
   dark_burgundy   = "#6B1A3A", medium_rose     = "#A83060",
   light_rose      = "#D4789A", very_light_pink = "#F2B8CC",
@@ -145,7 +131,45 @@ coefs       <- coef(summary(m1_bis))
 fmt_p       <- function(p) if (p < 0.001) "p < 0.001" else if (p < 0.01) sprintf("p = %.3f **", p) else if (p < 0.05) sprintf("p = %.3f *", p) else sprintf("p = %.3f", p)
 label_age   <- paste0("Age : ",     fmt_p(coefs["age",                       "Pr(>|t|)"]), "     Time × Age : ",     fmt_p(coefs["time_num:age",              "Pr(>|t|)"]))
 label_lith  <- paste0("Lithium : ", fmt_p(coefs["lithium_treatYes",          "Pr(>|t|)"]), "     Time × Lithium : ", fmt_p(coefs["time_num:lithium_treatYes", "Pr(>|t|)"]))
-df_lith     <- df_filtered |> mutate(lithium_plot = fct_na_value_to_level(lithium_treat, "Unknown"))
+
+df_lith <- df_filtered |> 
+  mutate(lithium_plot = fct_na_value_to_level(lithium_treat, "Unknown"))
+
+# Compute n
+n_age <- df_filtered |>
+  filter(!is.na(age_cat)) |>
+  distinct(fondacode, age_cat) |>
+  count(age_cat) |>
+  deframe()
+
+n_lith <- df_lith |>
+  distinct(fondacode, lithium_plot) |>
+  count(lithium_plot) |>
+  deframe()
+
+# Relabel palettes
+pal_age_n <- setNames(
+  pal_age,
+  paste0(names(pal_age), " (n=", n_age[names(pal_age)], ")")
+)
+
+pal_lith_n <- setNames(
+  pal_lith,
+  paste0(names(pal_lith), " (n=", n_lith[names(pal_lith)], ")")
+)
+
+df_age <- df_filtered |>
+  filter(!is.na(age_cat)) |>                      # keep only rows with known age_cat
+  mutate(age_cat_n = factor(
+    paste0(age_cat, " (n=", n_age[as.character(age_cat)], ")"),
+    levels = names(pal_age_n)
+  ))
+
+df_lith <- df_lith |>
+  mutate(lithium_plot_n = factor(
+    paste0(lithium_plot, " (n=", n_lith[as.character(lithium_plot)], ")"),
+    levels = names(pal_lith_n)
+  ))
 
 make_traj_panel <- function(data, colour_var, palette, legend_title, label_txt,
                             newdata = NULL, visit_lty = "dashed") {
@@ -175,16 +199,23 @@ make_traj_panel <- function(data, colour_var, palette, legend_title, label_txt,
   p
 }
 
-p1 <- make_traj_panel(df_filtered, "age_cat",    c(pal_age, "Population mean" = "grey30"),
-                      "Age category", label_age, newdata = newdata_base) + labs(title = "By age category")
-p2 <- make_traj_panel(df_lith,     "lithium_plot", pal_lith,
-                      "Lithium treatment", label_lith) + labs(title = "By lithium treatment")
+# ── Plots ────────────────────────────────────────────────────────────────────
+p1 <- make_traj_panel(df_age,  "age_cat_n",
+                      c(pal_age_n, "Population mean" = "grey30"),
+                      "Age category", label_age, newdata = newdata_base) +
+  labs(title = "By age category")
+
+p2 <- make_traj_panel(df_lith, "lithium_plot_n",
+                      pal_lith_n,
+                      "Lithium treatment", label_lith) +
+  labs(title = "By lithium treatment")
 
 plot_age_lithium <- (p1 | p2) + plot_annotation(
   title = "Longitudinal trajectories of GDF15",
   theme = theme(plot.title = element_text(size = 16, face = "bold")))
+
 print(plot_age_lithium)
-ggsave("outcome/mixed_model_age_lithium_GDF15.png", plot_age_lithium, width = 12, height = 8, dpi = 300, bg = "white")
+ggsave("outcome/mixed_model_age_lithium_GDF15_numbers.png", plot_age_lithium, width = 12, height = 8, dpi = 300, bg = "white")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. HELPER FUNCTIONS
@@ -315,7 +346,7 @@ run_clinical_on_GDF15 <- function(data, vars, gdf15 = "GDF15", log_gdf15 = TRUE,
 # 7. run_clinical_on_GDF15_within() — Mundlak decomposition
 # ══════════════════════════════════════════════════════════════════════════════
 
-run_clinical_on_GDF15_within <- function(data, vars, gdf15 = "GDF15", log_gdf15 = TRUE,
+run_clinical_on_GDF15_mundlak <- function(data, vars, gdf15 = "GDF15", log_gdf15 = TRUE,
                                          id = "fondacode", time = "time_num", age = "age",
                                          time_x_within = FALSE, adjust_lithium = FALSE,
                                          transformations = list(), families = list(),
@@ -347,6 +378,7 @@ run_clinical_on_GDF15_within <- function(data, vars, gdf15 = "GDF15", log_gdf15 
     tr          <- transformations[[v]] %||% "identity"
     formula_str <- sprintf("%s ~ %s + (1 | %s)", make_lhs(v, tr), fixed_part, id)
     model <- fit_lmer(formula_str, data, fam_str)
+    n_obs <- n_distinct(model@frame[[id]])
     if (is.null(model)) { warning(sprintf("Model failed: %s", v)); return(NULL) }
     
     coefs   <- summary(model)$coefficients
@@ -362,7 +394,7 @@ run_clinical_on_GDF15_within <- function(data, vars, gdf15 = "GDF15", log_gdf15 
     diag         <- model_diagnostics(model, id, time, outlier_thr)
     
     tibble(
-      variable = v, transform = tr, family = fam_str, lithium_adjusted = adjust_lithium,
+      variable = v, n = n_obs, transform = tr, family = fam_str, lithium_adjusted = adjust_lithium,
       beta_within  = round(within_coef$beta, 4),   SE_within  = round(within_coef$se, 4),
       CI_low_within  = round(within_coef$ci_lo, 4), CI_high_within  = round(within_coef$ci_hi, 4),
       t_within  = round(within_coef$tval, 3),       p_within  = round(within_coef$pval, 4),
@@ -416,7 +448,8 @@ plot_mixed_results <- function(data, results, outcome = "GDF15", id = "fondacode
   sig_symbol   <- function(p) case_when(is.na(p) ~ "", p < 0.001 ~ "***", p < 0.01 ~ "**", p < 0.05 ~ "*", p < 0.1 ~ ".", TRUE ~ "")
   phantom_df   <- data.frame(x = NA_real_, y = NA_real_)
   
-  rev_stats <- list(); newdata_list <- list(); df_augs <- list()
+  rev_stats <- list(); newdata_list <- list(); df_augs <- list(); n_patients <- list()  
+  
   for (v in sig_vars) {
     res_row   <- results |> filter(variable == v)
     transform <- if ("transform" %in% names(res_row) && !is.na(res_row$transform) &&
@@ -446,6 +479,7 @@ plot_mixed_results <- function(data, results, outcome = "GDF15", id = "fondacode
     nd$pred <- predict(model, newdata = nd, re.form = NA)
     
     df_augs[[v]]      <- model@frame |> mutate(y_obs = .data[[v_lhs]])
+    n_patients[[v]]   <- n_distinct(model@frame[[id]])  
     newdata_list[[v]] <- nd
   }
   
@@ -454,8 +488,8 @@ plot_mixed_results <- function(data, results, outcome = "GDF15", id = "fondacode
   
   panel_list <- lapply(vars_ok, function(v) {
     s      <- rev_stats[[v]]; nd <- newdata_list[[v]]
-    sub_txt <- sprintf("\u03b2 = %.4f  \u00b7  p = %.4f%s  \u00b7  pFDR = %.4f%s",
-                       s$beta, s$p, sig_symbol(s$p), p_fdr[[v]], sig_symbol(p_fdr[[v]]))
+    sub_txt <- sprintf("N = %d  \u00b7  \u03b2 = %.4f  \u00b7  p = %.4f%s  \u00b7  pFDR = %.4f%s",
+                       n_patients[[v]], s$beta, s$p, sig_symbol(s$p), p_fdr[[v]], sig_symbol(p_fdr[[v]]))
     
     ggplot() +
       geom_line(data  = df_augs[[v]], aes(.data[[time]], y_obs, group = .data[[id]]), colour = "#8899AA", alpha = 0.12, linewidth = 0.4) +
@@ -489,6 +523,7 @@ plot_mixed_results <- function(data, results, outcome = "GDF15", id = "fondacode
           legend.key.width = unit(1.6, "cm"), legend.key.height = unit(0.6, "cm"))
 }
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 9. plot_mixed_gdf15_xaxis() — GDF15 on x-axis, outcome on y-axis
 # ══════════════════════════════════════════════════════════════════════════════
@@ -516,7 +551,8 @@ plot_mixed_gdf15_xaxis <- function(data, results, outcome = "GDF15", id = "fonda
   
   apply_tr <- function(x, tr) switch(tr, sqrt = sqrt(x), log = log(x), log10 = log10(x), log2 = log2(x), x)
   
-  model_stats <- list(); obs_data <- list(); pred_data <- list()
+  model_stats <- list(); obs_data <- list(); pred_data <- list(); n_patients <- list()
+  
   for (v in sig_vars) {
     res_row   <- results |> filter(variable == v)
     transform <- if ("transform" %in% names(res_row) && !is.na(res_row$transform) && !res_row$transform %in% c("identity", "none", "")) res_row$transform else ""
@@ -543,6 +579,8 @@ plot_mixed_gdf15_xaxis <- function(data, results, outcome = "GDF15", id = "fonda
       filter(is.finite(.y_obs), is.finite(x_obs)) |>
       rename(!!v_lhs := .y_obs)
     
+    n_patients[[v]] <- n_distinct(obs_data[[v]][[id]])
+    
     nd <- do.call(rbind, lapply(time_vals, function(t_val) {
       nd_v <- data.frame(matrix(ncol = 0, nrow = n_pred))
       nd_v[[time]] <- t_val; nd_v[[age]] <- age_m; nd_v[[outcome]] <- gdf15_raw_seq
@@ -560,8 +598,9 @@ plot_mixed_gdf15_xaxis <- function(data, results, outcome = "GDF15", id = "fonda
   
   panel_list <- lapply(vars_ok, function(v) {
     s     <- model_stats[[v]]; nd <- pred_data[[v]]; v_lhs <- s$v_lhs
-    sub_txt <- sprintf("\u03b2(time\u00d7GDF15) = %.4f  \u00b7  p = %.4f%s  \u00b7  pFDR = %.4f%s",
-                       s$beta, s$p, sig_symbol(s$p), p_fdr[[v]], sig_symbol(p_fdr[[v]]))
+    sub_txt <- sprintf("N = %d  \u00b7  \u03b2(time\u00d7GDF15) = %.4f  \u00b7  p = %.4f%s  \u00b7  pFDR = %.4f%s",
+                       n_patients[[v]], s$beta, s$p, sig_symbol(s$p), p_fdr[[v]], sig_symbol(p_fdr[[v]]))  
+    
     ggplot() +
       { if (show_obs) geom_point(data = obs_data[[v]], aes(x_obs, .data[[v_lhs]], colour = visit, shape = visit), alpha = 0.25, size = 1.3) else list() } +
       geom_line(data = nd, aes(x_pred, pred, colour = visit, linetype = visit), linewidth = 1.1) +
@@ -737,7 +776,80 @@ make_gt_theme <- function(tbl, dark_burgundy = "#6E123B", light_pink = "#F2B8CC"
                 column_labels.border.bottom.color = border_gray, table.width = pct(100), table.font.size = 13)
 }
 
-export_logistic_combined_table <- function(results_all, filename, title = "GDF15 prognostic models") {
+export_mundlak_table <- function(results_mundlak, filename,
+                                title    = "GDF15 [log10(pg/mL)] within- and between-person effects on clinical scores",
+                                subtitle = "Adjusted for age and lithium treatment") {
+  library(gt); dir.create(dirname(filename), showWarnings = FALSE, recursive = TRUE)
+  
+  sig_fn <- function(p) case_when(
+    !is.na(p) & p < 0.001 ~ "***", !is.na(p) & p < 0.01 ~ "**",
+    !is.na(p) & p < 0.05  ~ "*",   !is.na(p) & p < 0.10  ~ ".", TRUE ~ ""
+  )
+  
+  make_block <- function(effect, label) {
+    results_mundlak |>
+      filter(!is.na(.data[[paste0("beta_", effect)]])) |>
+      transmute(
+        effect_label  = label,
+        variable,
+        n,
+        `β [95% CI]`  = paste0(
+          sprintf("%.4f", .data[[paste0("beta_",    effect)]]), "  [",
+          sprintf("%.4f", .data[[paste0("CI_low_",  effect)]]), " ; ",
+          sprintf("%.4f", .data[[paste0("CI_high_", effect)]]), "]"
+        ),
+        t         = .data[[paste0("t_", effect)]],
+        p_value   = round(.data[[paste0("p_",          effect)]], 4),
+        p_adj_fdr = round(.data[[paste0("p_adj_fdr_",  effect)]], 4),
+        AIC, BIC, ICC,
+        sig       = sig_fn(.data[[paste0("p_",         effect)]]),
+        sig_fdr   = sig_fn(.data[[paste0("p_adj_fdr_", effect)]])
+      ) |>
+      arrange(p_value)
+  }
+  
+  tbl_data <- bind_rows(
+    make_block("within",  "Within-person effect  (GDF15_dev)"),
+    make_block("between", "Between-person effect  (GDF15_mean)")
+  )
+  
+  tbl <- gt(tbl_data, groupname_col = "effect_label") |>
+    tab_header(
+      title    = md(paste0("**", title, "**")),
+      subtitle = md(paste0("<span style='color:#888888; font-size:13px;'>", subtitle, "</span>"))
+    ) |>
+    cols_label(
+      variable    = "Clinical variable",
+      n           = "N",
+      `β [95% CI]` = "\u03b2 [95% CI]",
+      t           = "t",
+      p_value     = "p",
+      p_adj_fdr   = "FDR p",
+      AIC         = "AIC", BIC = "BIC", ICC = "ICC",
+      sig         = "Sig.", sig_fdr = "Sig. (FDR)"
+    ) |>
+    cols_align(align = "left",   columns = c(variable, `β [95% CI]`)) |>
+    cols_align(align = "center", columns = c(n, sig, sig_fdr)) |>
+    # ── pink row-group headers ──────────────────────────────────────────────
+    tab_style(
+      style = list(
+        cell_fill(color = "#FAD4E0"),
+        cell_text(color = "#6E123B", weight = "bold", size = px(13))
+      ),
+      locations = cells_row_groups()
+    ) |>
+    make_gt_theme() |>
+    
+    tab_footnote(
+      footnote  = "\u00b7 p < 0.10  * p < 0.05  ** p < 0.01  *** p < 0.001",
+      locations = cells_column_labels(columns = sig)
+    )
+  
+  print(tbl); gtsave(tbl, filename = filename)
+  cat("Table exported to:", filename, "\n"); invisible(tbl)
+}
+
+export_logistic_table <- function(results_all, filename, title = "GDF15 prognostic models") {
   library(gt); dir.create(dirname(filename), showWarnings = FALSE, recursive = TRUE)
   sig_fn <- function(p, v = p) case_when(!is.na(v) & v < 0.001 ~ "***", !is.na(v) & v < 0.01 ~ "**",
                                          !is.na(v) & v < 0.05 ~ "*",   !is.na(v) & v < 0.10 ~ "·", TRUE ~ "")
@@ -764,6 +876,7 @@ export_logistic_combined_table <- function(results_all, filename, title = "GDF15
 
 export_delta_table <- function(results_delta, filename,
                                title = "GDF15 [log10(pg/mL)] predicting change in clinical scores",
+                               subtitle = "Adjusted for age and lithium treatment",
                                transform = "sqrt(|Δ|)·sign(Δ)") {
   library(gt); dir.create(dirname(filename), showWarnings = FALSE, recursive = TRUE)
   has_sqrt  <- any(results_delta$transform == "sqrt(|Δ|)·sign(Δ)", na.rm = TRUE)
@@ -779,7 +892,8 @@ export_delta_table <- function(results_delta, filename,
     select(window, variable, n, `β [95% CI]`, t, p_value, p_adj_fdr, R2, adj_R2, sig, sig_fdr)
   
   tbl <- gt(tbl_data, groupname_col = "window") |>
-    tab_header(title = md(paste0("**", title, "**"))) |>
+    tab_header(title = md(paste0("**", title, "**")),
+               subtitle = md(paste0("<span style='color:#888888; font-size:13px;'>", subtitle, "</span>"))) |>
     cols_label(variable = if (has_sqrt) "Clinical variable (sqrt)" else "Clinical variable",
                n = "N", `β [95% CI]` = "\u03b2 [95% CI]", t = "t",
                p_value = "p", p_adj_fdr = "FDR p", R2 = "R\u00b2", adj_R2 = "Adj. R\u00b2",
@@ -823,28 +937,30 @@ combined_plot <- plot_mixed_results(data = df_filtered, results = results_clinic
                                     filter_by = "p_slope", plot_alpha = 0.05, ncol = 2,
                                     lithium = "lithium_treat")
 print(combined_plot)
-ggsave("outcome/mixed_model_color_clinical_GDF15.png", combined_plot, width = 12, height = 8, dpi = 300, bg = "white")
+ggsave("outcome/mixed_model_color_clinical_GDF15_numbers.png", combined_plot, width = 12, height = 8, dpi = 300, bg = "white")
 
 plot_gdf15_xaxis <- plot_mixed_gdf15_xaxis(data = df_filtered, results = results_clinical, outcome = "GDF15", show_obs = TRUE, ncol = 2)
 print(plot_gdf15_xaxis)
-ggsave("outcome/mixed_model_color_clinical_GDF15_xaxis.png", plot_gdf15_xaxis, width = 12, height = 8, dpi = 300, bg = "white")
+ggsave("outcome/mixed_model_color_clinical_GDF15_xaxis_numbers.png", plot_gdf15_xaxis, width = 12, height = 8, dpi = 300, bg = "white")
 
 # Mundlak within/between decomposition
-results_within <- run_clinical_on_GDF15_within(data = df_filtered, vars = vars_clinical,
+results_mundlak <- run_clinical_on_GDF15_mundlak(data = df_filtered, vars = vars_clinical,
                                                transformations = sqrt_tr, adjust_lithium = TRUE)
-results_within |> select(variable, transform, family, beta_within, SE_within, CI_low_within, CI_high_within,
+results_mundlak |> select(variable, transform, family, beta_within, SE_within, CI_low_within, CI_high_within,
                          t_within, p_within, sig_within_raw, p_adj_fdr_within, sig_within_fdr) |> print(n = Inf, width = Inf)
-results_within |> select(variable, transform, beta_between, SE_between, p_between, sig_between_raw, p_adj_fdr_between, sig_between_fdr) |> print(n = Inf, width = Inf)
-results_within |> select(variable, transform, shapiro_resid_p, shapiro_re_p, DW_stat, DW_p, n_outliers, converged) |> print(n = Inf, width = Inf)
+results_mundlak |> select(variable, transform, beta_between, SE_between, p_between, sig_between_raw, p_adj_fdr_between, sig_between_fdr) |> print(n = Inf, width = Inf)
+results_mundlak |> select(variable, transform, shapiro_resid_p, shapiro_re_p, DW_stat, DW_p, n_outliers, converged) |> print(n = Inf, width = Inf)
+
+export_mundlak_table(results_mundlak, "outcome/gdf15_mundlak_between.png")
 
 # Delta regressions: GDF15 V0 predicting change V1-V0
-results_delta_sqrt_li <- run_delta_regressions(data = df_filtered, vars = vars_clinical,
+results_delta_regression <- run_delta_regressions(data = df_filtered, vars = vars_clinical,
                                                transform_vars = TRUE, adjust_lithium = TRUE,
                                                lithium_col = "lithium_treat")
-results_delta_sqrt_li |> select(window, variable, n, beta, SE, CI_low, CI_high, t, p_value, sig_raw, p_adj_fdr, sig_fdr, R2, adj_R2) |> print(n = Inf)
-results_delta_sqrt_li |> filter(p_value < 0.05)
+results_delta_regression |> select(window, variable, n, beta, SE, CI_low, CI_high, t, p_value, sig_raw, p_adj_fdr, sig_fdr, R2, adj_R2) |> print(n = Inf)
+results_delta_regression |> filter(p_value < 0.05)
 
-export_delta_table(results_delta = results_delta_sqrt_li,
+export_delta_table(results_delta = results_delta_regression,
                    filename      = "outcome/GDF15_delta_regressions.png",
                    title         = "GDF15 [log10(pg/mL)] predicting change in clinical scores")
 
@@ -855,7 +971,7 @@ results_v0_v2 <- run_logistic_gdf15(df = df_filtered, clinical_vars = vars_clini
 print(results_v0_v2)
 results_v0_v2 |> select(variable, p_value_adj_BH, AUC)
 
-export_logistic_combined_table(results_all = results_v0_v2,
+export_logistic_table(results_all = results_v0_v2,
                                filename    = "outcome/GDF15_logistic_combined.png",
                                title       = "GDF15 [log10(pg/mL)] prognostic models across time")
 
